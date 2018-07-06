@@ -10,7 +10,7 @@ cidrs       = {
   rds2     = "10.0.6.0/24"
   rds3     = "10.0.7.0/24"
 }
-localip = "18.209.56.247/32"
+localip = "x.x.x.x/x"
 domain_name = "chaseloydmitchell"
 db_instance_class	= "db.t2.micro"
 dbname			= "chasedb"
