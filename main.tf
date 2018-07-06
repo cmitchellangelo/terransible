@@ -282,3 +282,80 @@ resource "aws_security_group" "wp_public_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
+#Private Security Group
+
+resource "aws_security_group" "wp_private_sg" {
+  name        = "wp_private_sg"
+  description = "Used for private instances"
+  vpc_id      = "${aws_vpc.wp_vpc.id}"
+
+# Access from other security groups
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["${var.vpc_cidr}"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+#--------VPC endpoint for S3--------------------
+
+resource "aws_vpc_endpoint" "wp_private-s3_endpoint" {
+  vpc_id       = "${aws_vpc.wp_vpc.id}"
+  service_name = "com.amazonaws.${var.aws_region}.s3"
+
+  route_table_ids = ["${aws_vpc.wp_vpc.main_route_table_id}",
+    "${aws_route_table.wp_public_rt.id}",
+  ]
+
+  policy = <<POLICY
+{
+    "Statement": [
+        {
+            "Action": "*",
+            "Effect": "Allow",
+            "Resource": "*",
+            "Principal": "*"
+        }
+    ]
+}
+POLICY
+}
+
+#S3 code bucket
+
+resource "random_id" "wp_code_bucket" {
+  byte_length = 2
+}
+
+resource "aws_s3_bucket" "code" {
+  bucket        = "${var.domain_name}-${random_id.wp_code_bucket.dec}"
+  acl           = "private"
+  force_destroy = true
+
+  tags {
+    Name = "code bucket"
+  }
+}
+
+#---------RDS Database instances-----------
+
+resource "aws_db_instance" "wp_db" {
+  allocated_storage      = 10
+  engine                 = "mysql"
+  engine_version         = "5.6.27"
+  instance_class         = "${var.db_instance_class}"
+  name                   = "${var.dbname}"
+  username               = "${var.dbuser}"
+  password               = "${var.dbpassword}"
+  db_subnet_group_name   = "${aws_db_subnet_group.wp_rds_subnetgroup.name}"
+  vpc_security_group_ids = ["${aws_security_group.wp_rds_sg.id}"]
+  skip_final_snapshot    = true
+}
