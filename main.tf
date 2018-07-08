@@ -1,3 +1,4 @@
+root@ip-10-1-0-209:/home/ubuntu/terransible# cat main.tf
 provider "aws" {
   region  = "${var.aws_region}"
   profile = "${var.aws_profile}"
@@ -23,7 +24,7 @@ resource "aws_iam_role_policy" "s3_access_policy" {
    {
      "Effect": "Allow",
      "Action": "s3:*",
-     "Resourse": "*"
+     "Resource": "*"
    }
   ]
 }
@@ -78,7 +79,7 @@ resource "aws_route_table" "wp_public_rt" {
   vpc_id = "${aws_vpc.wp_vpc.id}"
 
   route {
-    cidr_block = "0.0.0.0./0"
+    cidr_block = "0.0.0.0/0"
     gateway_id = "${aws_internet_gateway.wp_internet_gateway.id}"
   }
 
@@ -227,44 +228,43 @@ resource "aws_db_subnet_group" "wp_rds_subnetgroup" {
 #-------Security groups---------
 
 resource "aws_security_group" "wp_dev_sg" {
-  name = "wp_dev_sg"
+  name        = "wp_dev_sg"
   description = "Used for access to the dev instance"
-  vpc_id = "${aws_vpc.wp_vpc.id}"
+  vpc_id      = "${aws_vpc.wp_vpc.id}"
 
   #SSH
 
   ingress {
-    from_port = 22
-    to_port = 22
-    protocol = "tcp"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
     cidr_blocks = ["${var.localip}"]
-}
-  
-  #HTTP
- 
-  ingress {
-    from_port = 80
-    to_port = 80
-    protocol = "tcp"
-    cidr_blocks = ["${var.localip}"]
-}
+  }
 
-  egress {
-    from_port = 0
-    to_port = 0
-    protocol = "-1"
+  #HTTP
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
- }
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 #-----Public Security Group--------
 
 resource "aws_security_group" "wp_public_sg" {
-  name = "wp_public_sg"
+  name        = "wp_public_sg"
   description = "Used for the elastic load balancer for public access"
-  vpc_id = "${aws_vpc.wp_vpc.id}"
+  vpc_id      = "${aws_vpc.wp_vpc.id}"
 
-                     #HTTP
+  #HTTP
 
   ingress {
     from_port   = 80
@@ -273,7 +273,7 @@ resource "aws_security_group" "wp_public_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-               #Outbound internet access
+  #Outbound internet access
 
   egress {
     from_port   = 0
@@ -282,14 +282,15 @@ resource "aws_security_group" "wp_public_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
-#Private Security Group
+
+#--------Private Security Group--------------------
 
 resource "aws_security_group" "wp_private_sg" {
   name        = "wp_private_sg"
   description = "Used for private instances"
   vpc_id      = "${aws_vpc.wp_vpc.id}"
 
-# Access from other security groups
+  # Access from other security groups
 
   ingress {
     from_port   = 0
@@ -302,6 +303,26 @@ resource "aws_security_group" "wp_private_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+#RDS Security Group
+resource "aws_security_group" "wp_rds_sg" {
+  name        = "wp_rds_sg"
+  description = "Used for DB instances"
+  vpc_id      = "${aws_vpc.wp_vpc.id}"
+
+  # SQL access from public/private security group
+
+  ingress {
+    from_port = 3306
+    to_port   = 3306
+    protocol  = "tcp"
+
+    security_groups = ["${aws_security_group.wp_dev_sg.id}",
+      "${aws_security_group.wp_public_sg.id}",
+      "${aws_security_group.wp_private_sg.id}",
+    ]
   }
 }
 
@@ -358,4 +379,196 @@ resource "aws_db_instance" "wp_db" {
   db_subnet_group_name   = "${aws_db_subnet_group.wp_rds_subnetgroup.name}"
   vpc_security_group_ids = ["${aws_security_group.wp_rds_sg.id}"]
   skip_final_snapshot    = true
+}
+
+#---key pair---
+
+resource "aws_key_pair" "wp_auth" {
+  key_name   = "${var.key_name}"
+  public_key = "${file(var.public_key_path)}"
+}
+
+#---dev server---
+
+resource "aws_instance" "wp_dev" {
+  instance_type = "${var.dev_instance_type}"
+  ami           = "${var.dev_ami}"
+
+  tags {
+    Name = "wp_dev"
+  }
+
+  key_name               = "${aws_key_pair.wp_auth.id}"
+  vpc_security_group_ids = ["${aws_security_group.wp_dev_sg.id}"]
+  iam_instance_profile   = "${aws_iam_instance_profile.s3_access_profile.id}"
+  subnet_id              = "${aws_subnet.wp_public1_subnet.id}"
+
+  provisioner "local-exec" {
+    command = <<EOD
+cat <<EOF > aws_hosts 
+[dev] 
+${aws_instance.wp_dev.public_ip} 
+[dev:vars] 
+s3code=${aws_s3_bucket.code.bucket}
+domain=${var.domain_name} 
+EOF
+EOD
+  }
+
+  provisioner "local-exec" {
+    command = "aws ec2 wait instance-status-ok --instance-ids ${aws_instance.wp_dev.id} --profile superhero && ansible-playbook -i aws_hosts wordpress.yml"
+  }
+}
+
+#------Load Balancer-----------
+
+resource "aws_elb" "wp_elb" {
+  name = "${var.domain_name}-elb"
+
+  subnets = ["${aws_subnet.wp_public1_subnet.id}",
+    "${aws_subnet.wp_public2_subnet.id}",
+  ]
+
+  security_groups = ["${aws_security_group.wp_public_sg.id}"]
+
+  listener {
+    instance_port     = 80
+    instance_protocol = "http"
+    lb_port           = 80
+    lb_protocol       = "http"
+  }
+
+  health_check {
+    healthy_threshold   = "${var.elb_healthy_threshold}"
+    unhealthy_threshold = "${var.elb_unhealthy_threshold}"
+    timeout             = "${var.elb_timeout}"
+    target              = "TCP:80"
+    interval            = "${var.elb_interval}"
+  }
+
+  cross_zone_load_balancing   = true
+  idle_timeout                = 400
+  connection_draining         = true
+  connection_draining_timeout = 400
+
+  tags {
+    Name = "wp_${var.domain_name}-elb"
+  }
+}
+
+#---------Golden AMI----------
+
+resource "random_id" "golden_ami" {
+  byte_length = 8
+}
+
+resource "aws_ami_from_instance" "wp_golden" {
+  name               = "wp_ami-${random_id.golden_ami.b64}"
+  source_instance_id = "${aws_instance.wp_dev.id}"
+
+  provisioner "local-exec" {
+    command = <<EOT
+cat <<EOF > userdata
+#!/bin/bash
+/usr/bin/aws s3 sync s3://${aws_s3_bucket.code.bucket} /var/www/html/
+/bin/touch /var/spool/cron/root
+sudo /bin/echo '*/5 * * * * aws s3 sync s3://${aws_s3_bucket.code.bucket} /var/www/html/' >> /var/spool/cron/root
+EOF
+EOT
+  }
+}
+
+#-----Launch Configuration----------
+
+resource "aws_launch_configuration" "wp_lc" {
+  name_prefix          = "wp_lc-"
+  image_id             = "${aws_ami_from_instance.wp_golden.id}"
+  instance_type        = "${var.lc_instance_type}"
+  security_groups      = ["${aws_security_group.wp_private_sg.id}"]
+  iam_instance_profile = "${aws_iam_instance_profile.s3_access_profile.id}"
+  key_name             = "${aws_key_pair.wp_auth.id}"
+  user_data            = "${file("userdata")}"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#-----Auto Scale Group---- 
+
+resource "aws_autoscaling_group" "wp_asg" {
+  name                      = "asg-${aws_launch_configuration.wp_lc.id}"
+  max_size                  = "${var.asg_max}"
+  min_size                  = "${var.asg_min}"
+  health_check_grace_period = "${var.asg_grace}"
+  health_check_type         = "${var.asg_hct}"
+  desired_capacity          = "${var.asg_cap}"
+  force_delete              = true
+  load_balancers            = ["${aws_elb.wp_elb.id}"]
+
+  vpc_zone_identifier = ["${aws_subnet.wp_private1_subnet.id}",
+    "${aws_subnet.wp_private2_subnet.id}",
+  ]
+
+  launch_configuration = "${aws_launch_configuration.wp_lc.name}"
+
+  tag {
+    key                 = "Name"
+    value               = "wp_asg-instance"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+#---------Route53-----------
+
+#primary zone
+
+resource "aws_route53_zone" "primary" {
+  name              = "${var.domain_name}.com"
+  delegation_set_id = "${var.delegation_set}"
+}
+
+#www 
+
+resource "aws_route53_record" "www" {
+  zone_id = "${aws_route53_zone.primary.zone_id}"
+  name    = "www.${var.domain_name}.com"
+  type    = "A"
+
+  alias {
+    name                   = "${aws_elb.wp_elb.dns_name}"
+    zone_id                = "${aws_elb.wp_elb.zone_id}"
+    evaluate_target_health = false
+  }
+}
+
+#dev 
+
+resource "aws_route53_record" "dev" {
+  zone_id = "${aws_route53_zone.primary.zone_id}"
+  name    = "dev.${var.domain_name}.com"
+  type    = "A"
+  ttl     = "300"
+  records = ["${aws_instance.wp_dev.public_ip}"]
+}
+
+#secondary zone
+
+resource "aws_route53_zone" "secondary" {
+  name   = "${var.domain_name}.com"
+  vpc_id = "${aws_vpc.wp_vpc.id}"
+}
+
+#db 
+
+resource "aws_route53_record" "db" {
+  zone_id = "${aws_route53_zone.secondary.zone_id}"
+  name    = "db.${var.domain_name}.com"
+  type    = "CNAME"
+  ttl     = "300"
+  records = ["${aws_db_instance.wp_db.address}"]
 }
