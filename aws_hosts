@@ -1,6 +1,6 @@
 root@ip-10-1-0-209:/home/ubuntu/terransible# cat aws_hosts
 [dev] 
-52.23.xxx.xxx
+52.23.xxx.123
 [dev:vars] 
 s3code=chaseloydmitchell-26734
 domain=chaseloydmitchell 
